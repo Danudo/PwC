@@ -1,0 +1,1137 @@
+######################################################################
+# NUEZ DORESTE, DANIEL ###################### 10 nov. 2024 ###########
+# ANÁLISIS DE DATOS PHYTON - MYSQL ###################################
+######################################################################
+
+# %%
+# Librerías 
+import pandas as pd
+import numpy as np
+import mysql.connector
+import streamlit as st
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+from datetime import timedelta, datetime
+from sqlalchemy import create_engine, text
+from shapely.geometry import Point
+
+# %%
+######################################################################
+# PREPROCESAMIENTO DE LOS DATOS ######################################
+######################################################################
+
+# %%
+# Se intenta la subida de datos. Observando que hay problemas de transcripción en ellos, donde el problema 
+# puede residir en haber añadido celdas adicionales que no se identifcan con ningún dato.
+
+stations_df = pd.read_csv('data_stations.txt', sep=',', names=['id', 'station', 'municipality', 'lat', 'lng'], header=None)
+
+trips_df = pd.read_csv('data_trips.txt', sep=',', names=['id', 'duration', 'start_date', 'start_station', 'end_date', 'end_station', 
+                                                     'bike_number', 'sub_type', 'zip_code', 'birth_date', 'gender'], header=None, na_values=['', ' '])
+
+print(stations_df.head())
+
+# Dada la respuesta a la ejecución anterior, algunas filas gozan de celdas adicionales.
+# Se pasará a comprobar la veracidad de esta respuesta y del número total de filas que se está contemplando.
+
+# Existen hasta 3044 filas que presentan fallos. No obstante, comparten un problema común: se emplean hasta cuatro 
+# separadores entre dos columnas de datos que deben ser contiguas, pudiéndose haber sido causado por un fallo de transcripción, 
+# haber hecho uso de los mismos separadores para determinar un campo nulo o, siendo más probable, por un error en la herramienta 
+# que se empleó para guardar dichos datos.
+
+# De todas formas, se realizará una sustitución de esta concatenación de cuatro separadores por uno solo, quedando limpio 
+# lo que sería la estructura general de los datos, siendo necesaria únicamente observar que los datos se han escrito correctamente.
+ # %%
+with open('data_trips.txt', 'r') as file:
+    e = 0
+    for line in file:
+        columns = line.split(',')
+        if len(columns) != 11:  
+            print("Fila problemática:", line)
+            e+=1
+print(e)
+# %%
+# Se limpia el archivo .txt antes de cargarlo
+with open('data_trips.txt', 'r') as file:
+    lines = file.readlines()
+
+# Se corrigen las filas problemáticas
+cleaned_lines = []
+for line in lines:
+    # Se eliminan las comas adicionales
+    line = line.replace(',,,,', ',')  # Se reemplaza 4 comas con 1 (si hay exactamente 3 comas extras)
+    
+    cleaned_lines.append(line)
+
+with open('cleaned_data_trips.txt', 'w') as file:
+    file.writelines(cleaned_lines)
+
+# Con el nuevo archivo de texto, se carga correctamente el conjunto de datos en trips_df y se verifica 
+# que se obtienen las mismas filas que en el archivo de texto: 1.570.001
+
+# Carga de datos limpiados con pandas
+trips_df = pd.read_csv('cleaned_data_trips.txt', sep=',', 
+                       names=['id', 'duration', 'start_date', 'start_station', 'end_date', 'end_station', 
+                              'bike_number', 'sub_type', 'zip_code', 'birth_date', 'gender'], 
+                       header=None, 
+                       na_values=['', ' '])
+stations_df = pd.read_csv('data_stations.txt', sep=',', names=['id', 'station', 'municipality', 'lat', 'lng'], header=None)
+
+# Se verifica el DataFrame
+print(trips_df.head())
+
+# %%
+print("Número de Viajeros Registrados:", len(trips_df))
+print("Número de Estaciones Registradas:", len(stations_df))
+
+# %%
+# Se analiza si los datos que almacenan el género y el estado del alquiler de la bicicleta están correctamente transcritos
+
+print("Valores únicos en sub_type:", trips_df['sub_type'].unique())
+print("Valores únicos en gender:", trips_df['gender'].unique())
+
+print("Valores nulos en sub_type:", trips_df['sub_type'].isnull().sum())
+print("Valores nulos en gender:", trips_df['gender'].isnull().sum())
+
+# Por un lado, la columna sub_type no registra valores nulos ni anómalos. Sin embargo, la columna género registra al menos un 
+# valor que tiene un espacio en blanco, pudiendo ser un obstáculo para el posterior análisis.
+# Se limpia esta columna elimnando dichos espacios.
+
+trips_df['gender'] = trips_df['gender'].str.strip()
+
+# Se verifican los valores únicos que toma esta columna.
+print("Valores únicos después de limpiar:", trips_df['gender'].unique())
+
+# %%
+# En busca de facilitar la comprensión de los datos, se modificarán las fechas de nacimiento, descritas en formato numérico, indicando
+# el día, mes y año exacto. Para ello, se ha generado una función sencilla que calcula dichos valores con la parte decimal del número, 
+# diferenciando si el año es bisiesto o no.
+
+# Función para convertir el número de fecha en formato YYYY.DDD a YYYY-MM-DD
+def fecha(num):
+    if not isinstance(num, (int, float)) or num == "" or pd.isna(num):  # Comprobar si no es numérico o vacío
+        return num
+    año = int(num) # Se extrae el año de la parte entera
+    if año < 1930 or año > 2024: # Se anulan edades atípicas como más de 96 años que la fecha de nacimiento sea superior a la actual
+        return np.nan
+    dec = num - año if num > año else año - num 
+    # Se diferencia el año bisiesto
+    bisiesto = año % 4 == 0
+    dias = 366 if bisiesto else 365
+    if dec > 0.999 and bisiesto == False:  # Se crea esta condición por temas de incongruencias con el último día del calendario
+        dia = dias - 1 
+    else:
+        dia = int(np.ceil(dec * dias)) if dec != 0 else 1
+    
+    # Se convierte el año y día a una fecha
+    return pd.to_datetime(f"{año}-{dia}", format="%Y-%j").strftime('%Y-%m-%d')
+
+
+# %%
+# Función para calcular la edad
+def edad(fecha):
+    if not isinstance(fecha, (int, float)) or fecha == "" or pd.isna(fecha):  # Comprobar si no es numérico o vacío
+        return fecha
+    año = int(fecha) # Se extrae el año de la parte entera
+    if año < 1930 or año > 2024:
+        return np.nan
+    año = 2024
+    return año - int(fecha)
+
+
+# %%
+# Se almacena una nueva columna con la edad de los usuarios aplicando la función edad y se transcriben todos los datos 
+# numéricos a formato de fecha YYYY-MM-DD en el conjunto de datos con la fución fecha.
+trips_df['age'] = trips_df['birth_date'].apply(edad)
+trips_df['birth_date'] = trips_df['birth_date'].apply(fecha)
+
+
+# %% 
+print(trips_df.head())
+# %%
+
+# Función para convertir los segundos de duración del viaje en formato HH:MM:SS
+def hms(seg):
+    return str(timedelta(seconds = seg))
+
+# %%
+# Se almacena la duración en segundos en nuevo data frame que se usará más adelante y se aplica la función hms a la columna de
+# la duración para que se expresen en formato HH:MM:SS
+DURATIONS_SEG = trips_df[['duration']]
+DURATIONS_SEG.to_csv('durations.csv', index=False)
+trips_df['duration_hms'] = trips_df['duration'].apply(hms)
+
+# %%
+print(trips_df.head())
+
+######################################################################
+# CONEXIÓN CON MYSQL #################################################
+######################################################################
+
+# %%
+usuario = '*******'  # <- INTRODUCIR USUARIO PERSONAL
+contraseña = '*************' # <- INTRODUCIR CONTRASEÑA PERSONAL 
+host = '127.0.0.1' 
+puerto = '3307'  
+nombre_base_de_datos = 'pwc'
+
+# Crear el engine
+engine = create_engine(f'mysql+mysqlconnector://{usuario}:{contraseña}@{host}:{puerto}/{nombre_base_de_datos}')
+
+# Prueba de Conexión
+try:
+    with engine.connect() as connection:
+        print("Conexión exitosa a la base de datos")
+except Exception as e:
+    print(f"Error al conectar a la base de datos: {e}")
+
+
+# %%
+# Se establece la ruta de conexión con mysql de otra forma
+sql = mysql.connector.connect(
+        host='localhost',  # o la IP del servidor MySQL
+        user='root',  # reemplaza por tu usuario de MySQL
+        password='Mysqlroot1234*',  # reemplaza por tu contraseña de MySQL
+        database='pwc',
+        port = '3307'
+    )
+
+# Se establece el comando que simulará las query de mysql
+query = sql.cursor()
+
+# %% 
+# Se crea la tabla que almacenará las personas
+query.execute("""
+CREATE TABLE personas (
+    id_pers INT PRIMARY KEY NOT NULL UNIQUE,
+    edad INT,
+    género VARCHAR(128),
+    fecha_nacimiento DATE,
+    cp VARCHAR(255)
+)
+""")   
+# Se crea la tabla que almacenará las estaciones
+query.execute("""            
+CREATE TABLE estaciones (
+    id_est INT PRIMARY KEY NOT NULL UNIQUE,
+    nombre_est VARCHAR(255) ,
+    localidad VARCHAR (255)       
+)
+""")
+
+# Se crea la tabla que almacenará los viajes realizados con las bicicletas
+query.execute("""
+CREATE TABLE viajes (
+    id_viaje INT PRIMARY KEY NOT NULL UNIQUE AUTO_INCREMENT,
+    duracion TIME,
+    est_inicio INT,
+    est_final INT,
+    bicicleta VARCHAR(6),
+    tipo VARCHAR(255),
+    id_persona INT NOT NULL          
+)
+""")
+
+# %%
+# Se cierra el cursor y dicha conexión. A partir de este momento, se emplearé el método con engine.
+query.close()
+sql.close()
+
+# %%
+
+######################################################################
+# CARGA DE DATOS EN MYSQL ############################################
+######################################################################
+
+# Creación de los DATAFRAME que alamcenarán los datos ordenados de las tablas en MYSQL
+# DATAFRAME TABLA VIAJES
+
+DF_STATIONS = stations_df[['id','station','municipality']]
+DF_STATIONS = DF_STATIONS.rename(columns={
+    'id': 'id_est',
+    'station': 'nombre_est',
+    'municipality': 'localidad'
+})
+
+# DATAFRAME TABLA PERSONAS
+
+DF_PERSONAS = trips_df[['id','age','gender','birth_date','zip_code']]
+DF_PERSONAS = DF_PERSONAS.rename(columns ={
+    'id' : 'id_pers',
+    'age' : 'edad',
+    'gender' : 'género',
+    'birth_date' : 'fecha_nacimiento',
+    'zip_code' : 'cp'
+}) 
+
+# DATAFRAME TABLA VIAJES
+
+DF_VIAJES = trips_df[['duration',  'start_station','end_station','start_date', 'end_date',  
+                              'bike_number', 'sub_type','id']]
+DF_VIAJES = DF_VIAJES.rename(columns ={
+    'duration' : 'duración',
+    'start_station' : 'est_inicio',
+    'end_station' : 'est_final',
+    'start_date' : 't_inicial',
+    'end_date' : 't_final',
+    'bike_number' : 'bicicleta',
+    'sub_type' : 'tipo',
+    'id' : 'id_pers'
+}) 
+
+
+# %%
+# Carga de datos en la tabla ESTACIONES con DF_STATIONS
+for _, row in DF_STATIONS.iterrows():
+    with engine.connect() as connection:
+        query_prox = text("""
+            INSERT INTO pwc.estaciones (id_est, nombre_est, localidad) VALUES (:a, :b, :c)
+        """)
+        connection.execute(query_prox, {'a': row['id_est'], 
+                                        'b': row['nombre_est'].strip("'"), 
+                                        'c': row['localidad'].strip("'")
+                                        })
+        connection.commit()
+
+
+# %%
+# Carga de datos en la tabla PERSONAS con DF_PERSONAS
+for _, row in DF_PERSONAS.iterrows():
+    with engine.connect() as connection:
+        query_prox = text("""
+            INSERT INTO pwc.personas (id_pers, edad, género, fecha_nacimiento, cp) VALUES (:a, :b, :c, :d, :e)
+        """)
+        connection.execute(query_prox, 
+                           {'a': row['id_pers'], 
+                            'b': None if pd.isna(row['edad']) else row['edad'], 
+                            'c': None if pd.isna(row['género']) else row['género'].strip("'"), 
+                            'd': None if pd.isna(row['fecha_nacimiento']) else row['fecha_nacimiento'].strip("'"), 
+                            'e': None if pd.isna(row['edad']) else row['edad']
+                            })
+        connection.commit()
+
+
+# %%
+# Carga de datos en la tabla VIAJES con DF_VIAJES
+for _, row in DF_VIAJES.iterrows():
+    with engine.connect() as connection:
+        query_prox = text("""
+            INSERT INTO pwc.viajes (duracion, est_inicio, est_final,  bicicleta, tipo, id_persona) VALUES (:a, :b, :c, :f, :g, :h)
+        """)
+        connection.execute(query_prox, 
+                           {'a': row['duración'], 
+                            'b': None if pd.isna(row['est_inicio']) else int(row['est_inicio']), 
+                            'c': None if pd.isna(row['est_final']) else int(row['est_final']), 
+                            #'d': None if pd.isna(row['t_inicial']) else row['t_inicial'].strip("'"), 
+                            #'e': None if pd.isna(row['t_final']) else row['t_final'].strip("'"),
+                            'f': None if pd.isna(row['bicicleta']) else row['bicicleta'].strip("'"), 
+                            'g': None if pd.isna(row['tipo']) else row['tipo'].strip("'"),
+                            'h': row['id_pers']
+                            })       
+        connection.commit()
+
+# %%
+
+######################################################################
+# DURACIÓN MEDIA DE VIAJE Y TRAYECTOS ################################
+######################################################################
+
+# %%
+# Para calcular la media de la duración de los viajes, dado que se tienen registrados los tiempos
+# en la columna 'duración' de la tabla 'viajes', se realizará una media de estos resultados, pasándolos
+# previamente a segundos y luego al formato original de la columna.
+
+query_avg_dur = text("""
+    SELECT SEC_TO_TIME(AVG(TIME_TO_SEC(duracion))) AS tiempo_medio
+    FROM viajes;                 
+ """)
+
+with engine.connect() as connection:
+    result_avg_dur = connection.execute(query_avg_dur)
+    AVG_DUR = result_avg_dur.fetchall()[0][0]
+
+# Se convierte a horas, minutos y segundos mediante divisiones
+horas, remainder = divmod(AVG_DUR.seconds, 3600)
+minutos, segundos = divmod(remainder, 60)
+
+AVG_DUR =  f"{horas:02}:{minutos:02}:{segundos:02}"
+print("La duración media de los viajes es de", AVG_DUR)
+
+# %%
+# En cuanto al número total de trayectos, como estos indican las diferentes opciones de estación de inicio
+# y final del recorrido que se realizaron, se deberán contar las diferentes parejas que aparecen resgitradas 
+# generadas por la dupla de datos pertenecientes a la columna 'est_incio' y 'est_final' de cada fila.
+
+query_tr = text("""
+    SELECT COUNT(DISTINCT est_inicio, est_final) AS total_trayectos_distintos
+    FROM viajes
+    WHERE est_inicio IS NOT NULL AND est_final IS NOT NULL; 
+""")
+
+with engine.connect() as connection:
+    result_tr = connection.execute(query_tr)
+    DIF_JOURNEYS = result_tr.fetchall()[0][0]
+
+print('Hay un total de', DIF_JOURNEYS, 'trayectos distintos')
+
+# %%
+
+######################################################################
+# DURACIÓN VIAJES SEGÚN EDAD #########################################
+######################################################################
+
+# %%
+# Para el cálculo de la duración de los viajes según la edad de los viajeros, se hará uso de un JOIN entre la tabla 
+# 'personas' y 'viajes', ya que, gracias al 'id_pers' e 'id_persona', se tiene una relación 1:1 entre ellas, sirviendo 
+# de enlace para filtrar los datos según convenga. 
+
+# En este caso, se seleccionará la edad de los usuarios y se sumarán los tiempos, previamente cambiados del formato HH:MM:SS
+# a segundos, de las mismas edades. Asimismo, se ordenarán según las edades en orden ascendente (ASC)
+
+query_avg_duration_age = text("""
+    SELECT p.edad, SUM(TIME_TO_SEC(v.duracion) / 60) AS minutos_totales
+    FROM personas p
+    JOIN viajes v ON p.id_pers= v.id_persona
+    GROUP BY p.edad
+    ORDER BY p.edad
+""")
+
+# Se ejecuta la consulta y se almacena el resultado bajo el nombre de data_avg_d_a
+with engine.connect() as connection:
+    result_avg_d_a = connection.execute(query_avg_duration_age)
+    data_avg_d_a = result_avg_d_a.fetchall()
+
+# Se genera un DataFrame usando las columnas 'edad' y 'minutos_totales' con el nombre 'df_minutos_edad'
+df_minutos_edad = pd.DataFrame(data_avg_d_a, columns=['edad', 'minutos_totales'])
+
+# Se copia este data frame y se elimina la fila correspondiente a los valores donde no se registra ninguna edad, para que sea 
+# más manejable y poder sacar conclusiones solo de las edades. Además de ello, se añaden las edades, entre la mínima y la máxima,
+# donde no se registra ningún usuario (que son 3) con un valor de duración igual a 0.
+
+DF_AVG_D_A = df_minutos_edad.drop(0).reset_index(drop=True)
+DF_AVG_D_A['edad'] = DF_AVG_D_A['edad'].apply(int)
+edad_min = DF_AVG_D_A['edad'].min()
+edad_max = DF_AVG_D_A['edad'].max()
+rango_edades = pd.DataFrame({'edad': range(edad_min, edad_max + 1)})
+
+DF_AVG_D_A = pd.merge(rango_edades, DF_AVG_D_A, on='edad', how='left').fillna(0)
+
+# Si se desea convertir los minutos_totales en un entero, quitar # en la siguiente línea.
+# DF_AVG_D_A['minutos_totales'] = DF_AVG_D_A['minutos_totales'].astype(int)
+
+# Se muestra el DataFrame resultante
+print(DF_AVG_D_A)
+
+# %%
+
+######################################################################
+# TRAYECTOS, DURACIÓN MEDIA Y POR EDAD DE VIAJES REALES ( >1 min) ####
+######################################################################
+
+#%%
+# En este caso, se llevarán acabo los mismo pasos anteriores pero con la excepción de que se
+# deberá añadir un condicional WHERE en las ejecuciones de MYSQL, ya que filtrará solamente 
+# los viajes con una duración mayor a 60 segundos.
+
+query_avg_dur_real = text("""
+    SELECT SEC_TO_TIME(AVG(TIME_TO_SEC(duracion))) AS tiempo_medio
+    FROM viajes
+    WHERE TIME_TO_SEC(duracion) > 60 ;                 
+ """)
+
+query_tr_real = text("""
+    SELECT COUNT(DISTINCT CONCAT(est_inicio, '-', est_final)) AS trayectos_distintos
+    FROM viajes 
+    WHERE TIME_TO_SEC(duracion) > 60 ; 
+""")
+
+query_avg_duration_age_real = text("""
+    SELECT p.edad, SUM(TIME_TO_SEC(v.duracion) / 60) AS minutos_totales
+    FROM personas p
+    JOIN viajes v ON p.id_pers= v.id_persona
+    WHERE TIME_TO_SEC(v.duracion) > 60
+    GROUP BY p.edad
+    ORDER BY p.edad;
+""")
+
+# Se ejecuta la consulta y se almacena el resultado bajo el nombre de data_avg_d_a
+with engine.connect() as connection:
+    result_avg_dur_real = connection.execute(query_avg_dur_real)
+    result_tr_real = connection.execute(query_tr_real)
+    result_avg_d_a_real = connection.execute(query_avg_duration_age_real)
+    AVG_DUR_R = result_avg_dur_real.fetchall()[0][0]
+    DIF_JOURNEYS_R = result_tr_real.fetchall()[0][0]
+    data_avg_d_a_r = result_avg_d_a_real.fetchall()
+
+# Se convierte la duración media a horas, minutos y segundos
+horas, remainder = divmod(AVG_DUR_R.seconds, 3600)
+minutos, segundos = divmod(remainder, 60) 
+AVG_DUR_R =  f"{horas:02}:{minutos:02}:{segundos:02}"
+
+# Se genera un DataFrame usando las columnas 'edad' y 'minutos_totales' con el nombre 'df_minutos_edad'
+df_minutos_edad_real = pd.DataFrame(data_avg_d_a_r, columns=['edad', 'minutos_totales'])
+
+# Se copia este data frame y se elimina la fila correspondiente a los valores donde no se registra ninguna edad, para que sea 
+# más manejable y poder sacar conclusiones solo de las edades. Además de ello, se añaden las edades, entre la mínima y la máxima,
+# donde no se registra ningún usuario (que son 3) con un valor de duración igual a 0.
+
+DF_AVG_D_A_R= df_minutos_edad_real.drop(0).reset_index(drop=True)
+DF_AVG_D_A_R['edad'] = DF_AVG_D_A_R['edad'].apply(int)
+edad_min = DF_AVG_D_A_R['edad'].min()
+edad_max = DF_AVG_D_A_R['edad'].max()
+rango_edades = pd.DataFrame({'edad': range(edad_min, edad_max + 1)})
+
+DF_AVG_D_A_R = pd.merge(rango_edades, DF_AVG_D_A_R, on='edad', how='left').fillna(0)
+
+# Si se desea convertir los minutos_totales en un entero, quitar # en la siguiente línea.
+# DF_AVG_D_A['minutos_totales'] = DF_AVG_D_A['minutos_totales'].astype(int)
+
+print('La duración media de los viajes reales es de', AVG_DUR_R,'.\n''Se han realizado',
+       DIF_JOURNEYS_R, 'trayectos distintos de viajes reales. \n \n' 
+       'TABLA DE MINUTOS DE VIAJES REALES REALIZADOS SEGÚN LA EDAD \n', DF_AVG_D_A_R)
+
+
+# %%
+
+######################################################################
+#DURACIÓN MEDIA DE VIAJES REALES (EN MIN) Y NÚMERO DE BICICLETAS #####
+######################################################################
+
+# %%
+# Se crean las query necesarias para cada una de las consultas de la base de datos
+query_min_real = text("""
+    SELECT ROUND(AVG(TIME_TO_SEC(duracion) / 60)) AS Duracion
+    FROM viajes
+    WHERE TIME_TO_SEC(duracion) > 60;                  
+""")
+
+query_bicis = text("""
+    SELECT COUNT(DISTINCT bicicleta) AS bicicletas_registradas
+    FROM viajes
+""")
+
+# Con las querys generadas, se ejecutan y se almacenan los datos en 'bicis_real' y 'min_real'
+with engine.connect() as connection:
+    result_bici = connection.execute(query_bicis)
+    result_min_real = connection.execute(query_min_real)
+    bicis = result_bici.fetchall()[0][0]
+    min_real = result_min_real.fetchall()[0][0]
+
+print('Los viajes reales tienen una duración media de',min_real,'minutos. \n' 'Hay un total de', bicis, 'bicicletas regisradas.')
+
+
+# %%
+
+######################################################################
+# NÚMERO DE VIAJES POR BICILETA ######################################
+######################################################################
+
+# %%
+query_bici_tr = text("""
+    SELECT bicicleta, COUNT(*) AS numero_de_viajes
+    FROM viajes
+    WHERE bicicleta IS NOT NULL AND bicicleta != ' '                  
+    GROUP BY bicicleta
+    ORDER BY numero_de_viajes DESC;
+""")
+
+with engine.connect() as connection:
+    result_bici_tr = connection.execute(query_bici_tr)
+    data_bici_tr = result_bici_tr.fetchall()
+
+DF_BICI_TR = pd.DataFrame(data_bici_tr, columns=['bicicleta', 'número_viajes'])
+
+# Se elimina la última columna que no almacena ninguna bicicleta
+DF_BICI_TR = DF_BICI_TR.drop(DF_BICI_TR.index[-1]).reset_index(drop=True)
+
+print('TABLA DE NÚMERO DE VIAJES REALIZADOS POR BICICLETA \n', DF_BICI_TR)
+
+# %%
+
+######################################################################
+# LOS 10 VIAJES MÁS DURADEROS DESDE FAN PIER #########################
+######################################################################
+
+# %%
+# Se crea la query que se ejecutará en MYSQL uniendo la tabla de viajes y las estaciones, donde
+# están almacenada la información de cada una de las estaciones diferenciadas por el identifcador,
+# que será la unión entre ambas tablas con un JOIN, ya que existe una relación 1:N con 'id_est' y
+# 'est_inicio' de las tablas 'estaciones' y 'viajes', respectivamente.
+
+query_FanPier_10 = text("""
+    SELECT v.id_viaje, v.duracion, v.est_inicio, e.nombre_est, v.bicicleta, v.id_persona
+    FROM viajes v
+    JOIN estaciones e ON v.est_inicio = e.id_est
+    WHERE e.nombre_est = 'Fan Pier'
+    ORDER BY v.duracion DESC
+    LIMIT 10;
+""")
+
+# Se ejecuta la query y se guarda el resultado, que es una tabla, como 'data_fp_10'
+with engine.connect() as connection:
+    result_FP_10 = connection.execute(query_FanPier_10)
+    data_fp_10 = result_FP_10.fetchall()
+
+# Se genera un DataFrame con el resultado y se guarda en 'DF_FP_10'.
+DF_FP_10 = pd.DataFrame(data_fp_10, columns=['id_viaje', 'duracion', 'est_inicio', 'nombre_est', 'bicicleta', 'id_persona'])
+
+# Como la columna duración nos la devuelve con el regitro de días (en la que todas valen 0 y es información inútil)
+# se transforma la columna en una cadena de texto y se selecciona la última parte entre espacios, relacionda con 
+# el tiempo.
+
+DF_FP_10['duracion'] = DF_FP_10['duracion'].apply(lambda x: str(x).split(' ')[-1])
+
+print('TABLA DE LOS 10 VIAJES DE MÁS DURACIÓN CON ORIGEN FAN PIER \n', DF_FP_10)
+
+
+# %%
+
+######################################################################
+# NÚMERO DE VIAJES IDA Y VUELTA POR ESTACIÓN #########################
+######################################################################
+
+#%%
+# En este caso será necesario indicar un nombre de estación y que sea correcto. 
+# Desde el código de phyton se introducirá manualmente, sin embargo, cuando se visualice en Streamlit, se ofrecerá
+# una lista de posibles nombres de estaciones.
+
+estacion = input("Por favor, introduce el nombre de la estación: ")
+
+# Se genera la query que tendrá un parámetro variable en función de la elección del usuario. Servirá para confirmar
+# que la elección del nombre es correcta
+query_verificacion = text("""
+    SELECT COUNT(*) FROM estaciones WHERE nombre_est = :estacion
+""")
+
+# Se ejecuta la query y se extraerá el valor escalar resultante de contar cuántas veces se repite el nombre en la lista.
+# Es decir, valdrá 1 (existe) o 0 (no existe)
+with engine.connect() as connection:
+    existe_estacion = connection.execute(query_verificacion, {"estacion": estacion}).scalar()
+
+# Si no existe devuelve un texto indicándolo. De existir, se genera y ejecuta la query correspondiente.
+if existe_estacion == 0:
+    print('La estación', estacion, 'no se registra en la base de datos.')
+else:
+    query_est_ida_vuelta = text("""
+        SELECT e.nombre_est, COUNT(*) AS total_viajes_ida_vuelta
+    FROM viajes v
+    JOIN estaciones e ON v.est_inicio = e.id_est
+    WHERE v.est_inicio = v.est_final
+    AND e.nombre_est = :estacion
+    GROUP BY v.est_inicio
+    """)
+
+    with engine.connect() as connection:
+        result_tr_st_iv = connection.execute(query_est_ida_vuelta,{"estacion": estacion})
+        data_tr_st_iv = result_tr_st_iv.fetchall()[0][1]
+
+    print('Hay un total de', data_tr_st_iv, 'viajes que salen y regresan de la estación', estacion, '.')
+
+# %%
+
+######################################################################
+# ALMACENAMIENTO DE RESULTADOS #######################################
+######################################################################
+
+RESULTADOS = pd.DataFrame({
+    'Duración Media': [AVG_DUR],  
+    'Duración Media Real': [AVG_DUR_R],  
+    'Trayectos Diferentes': [DIF_JOURNEYS],
+    'Trayectos Diferentes Reales' : [DIF_JOURNEYS_R],
+    'Número de Bicicletas' : [bicis],
+    'Media de Viajes Reales (Minutos)' : [min_real]   
+})
+
+RESULTADOS.to_csv('RESULTADOS.csv', index = False)
+DF_AVG_D_A.to_csv('DF_AVG_D_A.csv', index=False)
+DF_AVG_D_A_R.to_csv('DF_AVG_D_A_R.csv', index = False)
+DF_BICI_TR.to_csv('DF_BICI_TR.csv', index = False)
+DF_FP_10.to_csv('DF_FP_10.csv', index = False)
+
+# %%
+
+
+######################################################################
+######################################################################
+# SCRIPT DEL DASHBOARD ###############################################
+######################################################################
+######################################################################
+
+######################################################################
+# TÍTULO #############################################################
+######################################################################
+
+
+st.title("Análisis de Viajes en Bicicleta")
+st.subheader("por Daniel Nuez Doreste")
+
+st.write("""
+<div style="text-align: justify;">
+Bienvenidos al dashboard interactivo de análisis de viajes en bicicleta. Este espacio ha sido diseñado para proporcionar una visión detallada sobre los viajes realizados en una plataforma de bicicletas compartidas. A través de un conjunto de herramientas interactivas, este dashboard permite explorar una variedad de métricas y patrones relacionados con las bicicletas, trayectos, duración de los viajes y otros datos importantes.
+
+### Objetivo del Análisis
+El propósito de este análisis es entender mejor el comportamiento de los usuarios de la plataforma de bicicletas compartidas. ¿Cuánto tiempo pasan utilizando las bicicletas? ¿Cuáles son las estaciones más populares? ¿Qué factores influyen en la duración de los viajes y los trayectos realizados? A través de visualizaciones gráficas y cálculos de métricas clave, este dashboard proporciona respuestas a estas preguntas y muchas más, ayudando a tomar decisiones informadas sobre el uso y optimización de la red de bicicletas.
+
+### Funcionalidades Principales
+A continuación, podrá explorar distintas funcionalidades que le permitirán analizar la información de manera interactiva:
+- **Duración Media de los Viajes**: Obtenga una visión general de la duración promedio de los viajes, tanto de todos los trayectos como de aquellos que superan un minuto de duración.
+- **Análisis por Edad**: Examine cómo varía la cantidad de minutos y trayectos realizados según las edades de los usuarios, con opciones para filtrar por edad y trayectos reales.
+- **Trayectos por Estación**: Consulte los viajes que han salido y vuelto de una estación específica, lo que le permitirá identificar las estaciones con mayor actividad.
+- **Bicicletas y Trayectos**: Visualice el número de bicicletas disponibles y los trayectos realizados por cada una, distinguiendo entre viajes reales y no reales.
+
+### Datos Utilizados
+Este análisis se basa en una base de datos de viajes que incluye información sobre las estaciones de inicio y final, la duración de los trayectos, la bicicleta utilizada, la edad de los usuarios e información relevante de estos últimos. Además, los viajes "reales" son aquellos que superan un minuto de duración, permitiendo así un análisis más preciso de los trayectos realmente utilizados.
+
+Asimismo, se cuenta con una tabla que registra todos los valores de interés de las estaciones que participan en estos viajes, facilitando identificadores, localidad y nombre, entre otros. 
+ </div>
+""",  unsafe_allow_html=True )
+
+
+######################################################################
+# 01. DURACIÓN MEDIA DE VIAJES #######################################
+######################################################################
+
+
+st.subheader("1. Duración Media de los Viajes")
+st.write("""
+         <div style="text-align: justify;"> Se muestra un histograma que recoge la duración (en segundos) de cada uno de los viajes registrados, así como la duración media de los mismos y la real, que hace alusión a los viajes que duran más de un minuto. 
+         </div> """ ,  unsafe_allow_html=True )
+
+
+def hms_sec(time_str):
+    """Conversión de HH:MM:SS a segundos"""
+    h, m, s = map(int, time_str.split(":"))
+    return h * 3600 + m * 60 + s
+
+AVG_DUR = pd.read_csv('RESULTADOS.csv', header=None)[0][1]
+AVG_DUR_R = pd.read_csv('RESULTADOS.csv', header=None)[1][1]
+AVG_DUR_SEC = hms_sec(AVG_DUR)
+AVG_DUR_R_SEC = hms_sec(AVG_DUR_R)
+
+# Carga de los datos de duraciones en segundos
+df_duration = pd.read_csv('DURATION_SEG.csv')
+df_duration['duration'] = pd.to_numeric(df_duration['duration'], errors='coerce')
+
+# Creación del Histograma
+fig0, ax0 = plt.subplots(figsize=(10, 6))
+ax0.hist(df_duration['duration'], bins=50, edgecolor='black')
+
+# Se añaden las barras horizontales para las duraciones medias
+ax0.axvline(AVG_DUR_SEC, color='red', linestyle='--', label=f'Media General: {AVG_DUR}')
+ax0.axvline(AVG_DUR_R_SEC, color='green', linestyle='--', label=f'Media Real: {AVG_DUR_R}')
+
+# Título, etiquetas y leyenda
+ax0.set_title('HISTOGRAMA DE DURACIONES DE VIAJES EN BICICLETA')
+ax0.set_xlabel('Duración (segundos)')
+ax0.set_ylabel('Frecuencia')
+ax0.legend()
+
+st.pyplot(fig0)
+
+DUR_MIN_REAL = pd.read_csv('RESULTADOS.csv', header=None)[5][1]
+st.metric(label="DURACIÓN REAL EN MINUTOS SIN DECIMALES", value=f"{int(DUR_MIN_REAL)} minutos")
+
+
+######################################################################
+# 02. MAPA DE CALOR ##################################################
+######################################################################
+
+
+st.subheader("2. Número de Trayectos Distintos")
+DIF_JOURNEYS = pd.read_csv('RESULTADOS.csv', header=None)[2][1]
+DIF_JOURNEYS_R = pd.read_csv('RESULTADOS.csv', header=None)[3][1]
+
+st.write("Dado el gran número de trayectos distintos que existen entre las estaciones, se ha optado por generar un mapa de calor de los trayectos más utilizados limitando el número a elección del usuario.")
+st.markdown(f"No obstante, el número total de trayectos distintos es de: **{DIF_JOURNEYS} trayectos**. Mientras que, si se contabilizan solo los reales (más de un minuto) es de: **{DIF_JOURNEYS_R} trayectos**.")
+lim_tr = st.number_input("Introduce el número máximo de trayectos a ilustrar en el mapa de calor:", min_value=100)
+
+query_tr_dist = text("""
+    SELECT est_inicio, est_final, COUNT(*) AS num_viajes
+    FROM viajes
+    WHERE est_inicio IS NOT NULL AND est_final IS NOT NULL
+    GROUP BY est_inicio, est_final
+    ORDER BY num_viajes DESC
+    LIMIT :lim_tr;
+""")
+with engine.connect() as connection:
+    result_tr_dist = connection.execute(query_tr_dist, {"lim_tr":lim_tr})
+    data_trayectos = result_tr_dist.fetchall()
+DF_EST_TRA = pd.DataFrame(data_trayectos, columns=['est_inicio', 'est_final', 'num_viajes'])
+
+# Se crea una tabla de contingencia para el mapa de calor
+df_pivot = DF_EST_TRA.pivot(index='est_inicio', columns='est_final', values='num_viajes').fillna(0)
+df_pivot = df_pivot.astype(int)
+
+# Se crea el mapa de calor
+fig1, ax1 = plt.subplots(figsize=(12, 8))
+sns.heatmap(df_pivot, annot=True, fmt="d", cmap="YlGnBu", ax=ax1)
+
+ax1.set_title(f"'Mapa de Calor de los {lim_tr} Trayectos Más Realizados'")
+ax1.set_xlabel('Estación Final')
+ax1.set_ylabel('Estación de Inicio')
+
+st.pyplot(fig1)
+
+
+######################################################################
+# 03. TRAYECTOS Y MINUTOS POR EDAD ###################################
+######################################################################
+
+
+st.subheader("3. Número de Trayectos y Minutos por Edad")
+st.write("""
+    <div style="text-align: justify;">
+    En este análisis se muestran los minutos totales realizados y el número de trayectos realizados por personas de distintas edades. 
+
+    Se ha calculado la duración total de los trayectos de cada grupo de edad, tanto en minutos como en número de trayectos realizados. Además, este análisis permite visualizar cómo se distribuyen los minutos de uso de las bicicletas en función de la edad de los usuarios.
+
+    A continuación, puedes ver el gráfico de barras que muestra la cantidad total de minutos realizados por cada grupo de edad, lo cual proporciona una visión clara de la actividad de los usuarios en función de su edad.
+    </div> 
+    """ ,  unsafe_allow_html=True)
+
+edad = st.slider("Selecciona la edad", min_value=29, max_value=92, value=60)
+
+tra_real = st.radio("¿Quieres contar solo trayectos reales?", ('Sí', 'No'))
+
+if tra_real == 'Sí':
+    query_min_edad = text("""
+    SELECT COUNT(*) AS num_trayectos, SUM(TIME_TO_SEC(v.duracion) / 60) AS minutos_totales
+    FROM viajes v
+    JOIN personas p ON v.id_persona = p.id_pers
+    WHERE p.edad = :edad AND v.duracion > 60  
+    """)
+else:
+    query_min_edad = text("""
+    SELECT COUNT(*) AS num_trayectos, SUM(TIME_TO_SEC(v.duracion) / 60) AS minutos_totales
+    FROM viajes v
+    JOIN personas p ON v.id_persona = p.id_pers
+    WHERE p.edad = :edad
+    """)
+
+with engine.connect() as connection:
+    result_min_edad = connection.execute(query_min_edad, {"edad" : edad})
+    row = result_min_edad.fetchone()  # `fetchone()` devuelve una sola fila del resultado
+    
+    # Se extrae el número de trayectos
+    tr_edad = row[0]
+    # Se extraen los minutos totales si se calcula en el caso de trayectos reales
+    if tra_real == 'Sí':
+        min_edad = round(row[1],2)
+    else:
+        min_edad = 0 
+
+st.markdown(f"Los viajeros de **{edad} años** han registrado **{min_edad} minutos** de actividad con la bicicleta en un total de **{tr_edad} trayectos**" )
+
+query_edades = text("""
+SELECT p.edad, SUM(TIME_TO_SEC(v.duracion) / 60) AS minutos_totales
+FROM viajes v
+JOIN personas p ON v.id_persona = p.id_pers
+GROUP BY p.edad
+ORDER BY p.edad;
+""")
+
+with engine.connect() as connection:
+    result = connection.execute(query_edades)
+    df_minutos_edad_real = pd.DataFrame(result.fetchall(), columns=["edad", "minutos_totales"])
+
+DF_AVG_D_A_R= df_minutos_edad_real.drop(0).reset_index(drop=True)
+DF_AVG_D_A_R['edad'] = DF_AVG_D_A_R['edad'].apply(int)
+edad_min = DF_AVG_D_A_R['edad'].min()
+edad_max = DF_AVG_D_A_R['edad'].max()
+rango_edades = pd.DataFrame({'edad': range(edad_min, edad_max + 1)})
+
+DF_AVG_D_A_R = pd.merge(rango_edades, DF_AVG_D_A_R, on='edad', how='left').fillna(0)
+
+# Diagrama de barras
+fig2, ax2 = plt.subplots(figsize=(12, 6))  # Aquí creamos la figura explícitamente
+ax2.bar(DF_AVG_D_A_R["edad"], DF_AVG_D_A_R["minutos_totales"], color='skyblue', edgecolor='black')
+
+# Título y Etiquetas
+ax2.set_title("Minutos Totales Realizados por Edad", fontsize=16)
+ax2.set_xlabel("Edad")
+ax2.set_ylabel("Minutos Totales", fontsize=12)
+
+tick_positions = range(min(DF_AVG_D_A_R["edad"]), max(DF_AVG_D_A_R["edad"]) + 1, 3)
+tick_labels = [str(age) for age in tick_positions]
+ax2.set_xticks(tick_positions)
+ax2.set_xticklabels(tick_labels, rotation=45)
+
+st.pyplot(fig2)
+
+
+######################################################################
+# 04. 10 VIAJES CON MÁS DURACIÓN #####################################
+######################################################################
+
+
+st.subheader("4. Número total de bicicletas y trayectos realizados")
+
+st.write(""" 
+    <div style="text-align: justify;">
+    En este apartado, se muestra el número total de bicicletas registradas y un desglose detallado de los trayectos realizados por cada bicicleta. 
+    Para cada bicicleta, podrás ver cuántos viajes se han realizado, diferenciando entre los viajes reales (aquellos con duración superior a 1 minuto) y los demás. 
+    Esta información es útil para analizar el uso de las bicicletas, identificar las más activas y conocer cuántos trayectos se han registrado en total para cada una.
+    </div> """ ,  unsafe_allow_html=True)
+
+bicis_numero = pd.read_csv('RESULTADOS.csv', header=None)[3][1]
+st.markdown(f"Hay un total de **{bicis_numero}** bicicletas diferentes registradas en la tabla de datos.")
+
+tipo_viaje = st.radio("Selecciona el tipo de viaje:", ("Todos los Viajes", "Viajes Reales"))
+
+# Se coonsulta SQL para obtener la información según la selección del usuario
+if tipo_viaje == "Viajes Reales":
+    query_bicicletas = """
+    SELECT bicicleta, COUNT(*) AS num_trayectos
+    FROM viajes
+    WHERE duracion > 60  -- Filtra solo viajes reales
+    GROUP BY bicicleta
+    ORDER BY num_trayectos DESC;
+    """
+else:
+    query_bicicletas = """
+    SELECT bicicleta, COUNT(*) AS num_trayectos
+    FROM viajes
+    GROUP BY bicicleta
+    ORDER BY num_trayectos DESC;
+    """
+
+# Se ejecuta la query correspondiente y se expone la tabla de bicicletas cono el número de viajes
+with engine.connect() as connection:
+    df_bicicletas = pd.read_sql(query_bicicletas, connection)
+
+st.dataframe(df_bicicletas, use_container_width=True)
+
+
+######################################################################
+# 05. 10 VIAJES CON MÁS DURACIÓN #####################################
+######################################################################
+
+
+st.subheader("5. Los 10 Viajes Más Duraderos por Estación")
+st.write("""
+    <div style="text-align: justify;">
+    Este apartado permite analizar en detalle los viajes más extensos en términos de tiempo de desplazamiento desde una estación en particular. El usuario puede seleccionar cualquier estación de la red para observar los 10 viajes con mayor duración que partieron desde ella. Esta vista proporciona información valiosa sobre los patrones de uso en trayectos prolongados, permitiendo identificar, por ejemplo, las rutas más largas o frecuentadas para desplazamientos extensos.
+
+    Además de los tiempos de duración en formato detallado, se presenta información relevante de cada viaje, incluyendo la estación de inicio y final, la bicicleta utilizada, y la identificación del usuario (respetando la confidencialidad). Esta combinación de datos permite tener un contexto completo de los viajes largos, ayudando a visualizar mejor las preferencias y patrones de los usuarios en trayectos más prolongados.
+    </div> """ ,  unsafe_allow_html=True)
+
+with engine.connect() as connection:
+    estaciones_df = pd.read_sql("SELECT DISTINCT nombre_est FROM estaciones", connection)
+    estaciones = estaciones_df['nombre_est'].tolist()
+
+# Se genera un input, donde se seleccionará una estación posible de la base de datos
+estacion_selec = st.selectbox("Selecciona una estación:", estaciones, key="estacion_10")
+
+# Se crea la query con la selección del usuario
+if estacion_selec:
+    query_10_est = text("""
+    SELECT v.id_viaje, v.duracion, v.est_inicio, e.nombre_est, v.bicicleta, v.id_persona
+    FROM viajes v
+    JOIN estaciones e ON v.est_inicio = e.id_est
+    WHERE e.nombre_est = :estacion
+    ORDER BY v.duracion DESC
+    LIMIT 10
+    """)
+    
+    # Se ejecuta la query y se muestra la tabla con los 10 viajes con más duración de la estación seleccionada
+    with engine.connect() as connection:
+        result_df = connection.execute(query_10_est, {"estacion": estacion_selec})
+        data_10_est = result_df.fetchall() 
+    
+    # Se transforma la columna duración en un str para que no pierda el formato HH:MM:SS y se selecciona la última parte.
+    DF_10_EST = pd.DataFrame(data_10_est, columns=['id_viaje', 'duracion', 'est_inicio','nombre_est','bicicleta','id_persona'])
+    DF_10_EST['duracion'] = DF_10_EST["duracion"].apply(lambda x: str(x)).apply(lambda x: x.split(" ")[-1])
+
+    st.write(DF_10_EST)
+
+
+######################################################################
+# 06. VIAJES IDA y VUELTA ############################################
+######################################################################
+
+
+st.subheader("6. Viajes Ida y Vuelta por Estación")
+st.write("""
+    <div style="text-align: justify;">
+    Este apartado permite realizar una consulta interactiva para visualizar los viajes que han iniciado y finalizado en una estación específica.
+
+    A continuación, puedes seleccionar una estación y visualizar el número de viajes que han comenzado y finalizado en esa estación, facilitando el análisis del comportamiento de los trayectos dentro de la red de estaciones.
+    </div> """ ,  unsafe_allow_html=True)
+
+# Entrada interactiva para el nombre de la estación
+nombre_estacion = st.selectbox("Selecciona una estación:", estaciones, key="estacion_idavuelta")
+
+# Si el nombre de la estación es válido (está en la base de datos)
+if nombre_estacion:
+    # Se crea la query con la elección
+    query_est = text("""
+    SELECT e.nombre_est, COUNT(*) AS total_viajes_ida_vuelta
+    FROM viajes v
+    JOIN estaciones e ON v.est_inicio = e.id_est
+    WHERE v.est_inicio = v.est_final
+    AND e.nombre_est = :estacion
+    GROUP BY v.est_inicio
+    """)
+    with engine.connect() as connection:   
+        result = connection.execute(query_est, {"estacion": nombre_estacion})
+        numero_iv = result.fetchall()[0][1]   
+    # Se ejecuta la consulta para obtener los viajes más largos de la estación seleccionada
+    if numero_iv == 0:
+        st.write(f"No hay viajes registrados para la estación {nombre_estacion}.")
+    else:
+        st.write(f"La estación '{nombre_estacion}' registra {numero_iv} viajes con origen y destino en ella.")
+
+######################################################################
+# 07. RELACIÓN VIAJES _ TIEMPO #######################################
+######################################################################
+
+trips_df = pd.read_csv('trips_df.csv', header=0)
+
+# Eliminación de comillas simples y cambio de tipo de datos a datetime.
+trips_df['start_date'] = trips_df['start_date'].str.replace("'", "")  
+trips_df['end_date'] = trips_df['end_date'].str.replace("'", "")
+trips_df['start_date'] = pd.to_datetime(trips_df['start_date'], format='%Y-%m-%d %H:%M:%S')
+trips_df['end_date'] = pd.to_datetime(trips_df['end_date'], format='%Y-%m-%d %H:%M:%S')
+
+st.subheader("7. Relación del Viaje con Fecha y Tiempo")
+
+st.markdown("""
+<div style="text-align: justify;">
+El análisis temporal de los viajes en bicicleta permite obtener una visión más detallada de los patrones de uso según el tiempo, tanto en términos de frecuencia como de duración. En este apartado, se han considerado diferentes intervalos de tiempo, como los días de la semana y los meses del año, para comprender cómo varían los viajes a lo largo del tiempo.
+
+Este análisis es fundamental para identificar tendencias y patrones que podrían no ser tan evidentes si solo se considerara el total de los viajes. Por ejemplo, al observar los días de la semana, podemos ver diferencias en el número de viajes y en su duración media, lo que puede estar relacionado con los comportamientos habituales de las personas, como el trabajo o las actividades de ocio. 
+
+Además, el análisis de los viajes por mes nos permite evaluar la influencia de factores estacionales, como las variaciones climáticas, que podrían afectar tanto al número de trayectos realizados como a su duración media. En resumen, el análisis temporal proporciona una comprensión más profunda de los datos y ayuda a anticipar la demanda en diferentes momentos del año.
+
+En los gráficos a continuación, se muestran tanto el número de viajes como la duración media por día de la semana y por mes, así como los análisis de las horas de inicio y fin de la actividad. Los resultados sugieren ciertos patrones de comportamiento que pueden ser utilizados para optimizar los servicios y hacer previsiones más precisas.
+
+</div> """, unsafe_allow_html=True)
+
+Tipo_Hora = st.radio("¿Qué desea mostrar?", ('Horas de Salida', 'Horas de Llegada'))
+
+if Tipo_Hora == 'Horas de Salida':
+    trips_df['start_hour'] = trips_df['start_date'].dt.hour
+
+    # Se cuenta los viajes por hora
+    viajes_por_hora = trips_df.groupby('start_hour').size()
+
+    # Se muestra el gráfico de barras
+    import matplotlib.pyplot as plt
+    fig3, ax3 = plt.subplots()
+    ax3.bar(viajes_por_hora.index, viajes_por_hora.values)
+    ax3.set_xlabel('Hora de Salida')
+    ax3.set_ylabel('Número de Viajes')
+    ax3.set_title('Número de Salidas por Hora')
+    st.pyplot(fig3)
+else: 
+    trips_df['end_hour'] = trips_df['end_date'].dt.hour
+
+    # Se cuentan los viajes por hora
+    viajes_por_hora = trips_df.groupby('end_hour').size()
+
+    # Gráfico de barras
+    import matplotlib.pyplot as plt
+    fig4, ax4 = plt.subplots()
+    ax4.bar(viajes_por_hora.index, viajes_por_hora.values)
+    ax4.set_xlabel('Hora del Llegada')
+    ax4.set_ylabel('Número de Viajes')
+    ax4.set_title('Número de Llegadas por hora')
+    st.pyplot(fig4)
+
+trips_df['duration_min'] = trips_df['duration']/60
+
+trips_df['dia'] = trips_df['start_date'].dt.weekday
+
+# Se cuentan los viajes por día de la semana
+tr_dia = trips_df.groupby('dia').size()
+
+# Se calcula la media de la duración por día de la semana
+tr_avg_dia = trips_df.groupby('dia')['duration_min'].mean()
+
+# Gráfico de la distribución por día de la semana
+fig5, ax5 = plt.subplots()
+ax5.bar(tr_dia.index, tr_dia.values)
+ax5.set_xlabel('Día de la semana')
+ax5.set_ylabel('Número de viajes')
+ax5.set_title('Número de viajes por día de la semana')
+ax5.set_xticks(range(7))
+ax5.set_xticklabels(['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'])
+
+
+# Gráfico de la duración media por día de la semana
+fig6, ax6 = plt.subplots()
+ax6.bar(tr_avg_dia.index, tr_avg_dia.values)
+ax6.set_xlabel('Día de la semana')
+ax6.set_ylabel('Duración media (minutos)')
+ax6.set_title('Duración media de los viajes por día de la semana')
+ax6.set_xticks(range(7))
+ax6.set_xticklabels(['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'])
+
+col1, col2 = st.columns(2)
+
+# Se grafican juntos
+with col1:
+    st.pyplot(fig5)
+
+with col2:
+    st.pyplot(fig6)
+
+st.markdown("""
+    <div style="text-align: justify;">
+    Los gráficos anteriores muestran dos aspectos importantes en el análisis de los viajes según el día de la semana. El primero refleja el número total de viajes realizados cada día, mientras que el segundo nos da una visión de la duración media de los viajes para cada día de la semana.
+
+    En cuanto al número de viajes, podemos observar que **de lunes a viernes hay una mayor cantidad de trayectos realizados**, con una tendencia que se mantiene constante a lo largo de la semana. Esto sugiere que los días laborables son los más activos para los usuarios de la bicicleta, lo cual puede estar relacionado con los desplazamientos hacia el trabajo o actividades diarias.
+
+    Por otro lado, en los **fines de semana, los viajes son menos frecuentes**, pero cuando ocurren, **la duración media de los trayectos aumenta considerablemente**. Los días sábado y domingo muestran una duración media superior a los **20 minutos**, mientras que en los días laborables la duración promedio de los viajes suele oscilar entre los **13 y 14 minutos**.
+
+    Este comportamiento podría explicarse por el hecho de que las personas tienden a utilizar las bicicletas para actividades recreativas y de ocio durante el fin de semana, lo que implica trayectos más largos. En cambio, durante la semana, los trayectos suelen estar más orientados a desplazamientos cortos y funcionales, como ir al trabajo o realizar tereas cotidianas.
+
+    En resumen, los datos sugieren que **los días de semana son más activos en términos de número de viajes**, pero los **fines de semana se caracterizan por trayectos más largos** en términos de duración, lo que refleja un patrón distinto de uso de las bicicletas en función de las actividades y las necesidades de los usuarios.
+     </div> """ ,  unsafe_allow_html=True)
+
+
+trips_df['mes'] = trips_df['start_date'].dt.month
+
+# Se calcula el número de viajes por mes
+tr_mes = trips_df.groupby('mes').size()
+
+# Se calcula la duración media de los viajes por mes
+tr_avg_mes = trips_df.groupby('mes')['duration_min'].mean()
+
+
+# Gráfico de la distribución por día de la semana
+fig7, ax7 = plt.subplots()
+ax7.bar(tr_mes.index, tr_mes.values)
+ax7.set_xlabel('Mes')
+ax7.set_ylabel('Número de viajes')
+ax7.set_title('Número de viajes por mes')
+ax7.set_xticks(range(12))
+ax7.set_xticklabels(['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'])
+
+fig8, ax8 = plt.subplots()
+ax8.bar(tr_avg_mes.index, tr_avg_mes.values)
+ax8.set_xlabel('Mes')
+ax8.set_ylabel('Duración media por mes (minutos)')
+ax8.set_title('Duración media  de los viajes por mes del año')
+ax8.set_xticks(range(12))
+ax8.set_xticklabels(['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'])
+
+col3, col4 = st.columns(2)
+
+# Se grafican juntos
+with col3:
+    st.pyplot(fig7)
+
+with col4:
+    st.pyplot(fig8)
+
+st.write("""
+    <div style="text-align: justify;">
+    En cuanto al número de viajes por mes, se observa una tendencia creciente desde abril hasta septiembre. Durante este período, el número de viajes aumenta de manera lineal, alcanzando su punto máximo en septiembre. Después de este mes, el número de viajes se mantiene relativamente constante, con un ligero descenso hacia el final del año.
+
+    Por otro lado, al analizar la duración media de los viajes por mes, encontramos que, en general, se mantiene bastante estable durante la primera parte del año, rondando los 15 minutos de media. Sin embargo, a partir de octubre, noviembre y diciembre, se registra una disminución progresiva en la duración media de los viajes, descendiendo de manera uniforme en estos tres meses. Este comportamiento podría estar relacionado con la disminución de las temperaturas y las condiciones climáticas, lo que podría haber influido en la elección de trayectos más cortos durante la última parte del año.
+
+    Este análisis resalta cómo las variables de cantidad y duración de los viajes pueden verse afectadas por factores estacionales, lo que puede ser útil para la planificación y la optimización de los servicios de bicicletas en función de la demanda a lo largo del año.
+    </div> """ ,  unsafe_allow_html=True)
