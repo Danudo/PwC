@@ -191,9 +191,9 @@ except Exception as e:
 # %%
 # Se establece la ruta de conexión con mysql de otra forma
 sql = mysql.connector.connect(
-        host='localhost',  # o la IP del servidor MySQL
-        user='root',  # reemplaza por tu usuario de MySQL
-        password='Mysqlroot1234*',  # reemplaza por tu contraseña de MySQL
+        host='localhost',  
+        user='********',  # <- INTRODUCIR USUARIO PERSONAL 
+        password='***********',  # <- INTRODUCIR CONTRASEÑA PERSONAL 
         database='pwc',
         port = '3307'
     )
